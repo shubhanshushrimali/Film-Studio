@@ -1,0 +1,107 @@
+# Flow Configuration
+# Copy this file to config/config.toml and fill in your values.
+
+[llm]
+# Supported: openai, deepseek, ollama (any OpenAI-compatible API works)
+provider = "openai"
+api_key = ""
+base_url = ""  # Leave empty for default OpenAI endpoint
+model = "gpt-4o-mini"
+
+# DeepSeek example:
+#   provider = "deepseek"
+#   api_key = "sk-..."
+#   base_url = "https://api.deepseek.com"
+#   model = "deepseek-chat"
+
+# Ollama (local, free, no API key):
+#   provider = "ollama"
+#   api_key = ""
+#   base_url = "http://localhost:11434/v1"
+#   model = "llama3"
+
+[gpu_backend]
+# Supported: modal, runpod, self-hosted
+provider = "modal"
+url = ""  # base URL of your deployed GPU backend (e.g. https://you--flow-gpu-backend.modal.run)
+api_key = ""
+resolution = "480p"  # 480p or 720p
+clip_duration = 5  # seconds per clip
+
+# `flow deploy` defaults — deploy the GPU backend as a NAMED instance.
+# A token alone can't generate; you must deploy the open-source backend into
+# your account first, which yields the `url` above. Deploy several named
+# instances (e.g. an A100 pool and an H100 pool) and point `url` at one.
+#   flow deploy modal --name flow-gpu-a100 --gpu A100-80GB
+[deploy]
+provider = "modal"            # modal (automated) | aws | gcp (scaffolded)
+name = "flow-gpu-backend"     # instance name -> Modal app + subdomain label
+gpu = "A100-80GB"             # e.g. A100-80GB, H100
+model_t2v = "Wan-AI/Wan2.2-T2V-A14B-Diffusers"
+model_i2v = "Wan-AI/Wan2.2-I2V-A14B-Diffusers"
+region = ""                   # AWS/GCP only
+scaledown_window = 300        # seconds idle before Modal scales to zero
+
+[tts]
+# Text-to-speech provider. Built-ins: edge (free, online, no cloning),
+# miso (MisoTTS — natural voice + one-shot cloning, needs a GPU).
+# Add your own by subclassing flow.tts.TTSProvider and register_provider().
+provider = "edge"
+voice = "en-US-ChristopherNeural"
+api_key = ""  # Only needed for elevenlabs
+
+# MisoTTS settings (only when provider = "miso")
+miso_model = "MisoLabs/MisoTTS"
+miso_precision = "int8"  # bf16, int8, int4 (int8 = 16GB VRAM)
+# Dedicated MisoTTS HTTP endpoint (POST /tts/generate). Leave empty to run the
+# model locally, or to reuse gpu_backend.url.
+miso_endpoint = ""
+voice_sample = ""  # Path to reference audio for voice cloning (e.g., "config/voices/narrator.wav")
+voice_transcript = ""  # Transcript of the voice sample
+
+[publish]
+enabled = false
+platforms = ["tiktok", "youtube", "instagram", "facebook"]
+tiktok_access_token = ""
+youtube_client_id = ""
+youtube_client_secret = ""
+# Meta (Instagram Reels + Facebook Page) share one Graph API auth. Get a
+# long-lived Page access token + link an IG Business/Creator account to the Page.
+# Instagram Reels publish by public URL; Facebook also accepts a direct upload.
+meta_page_access_token = ""
+facebook_page_id = ""
+instagram_business_account_id = ""
+meta_graph_version = "v21.0"
+
+[scheduler]
+enabled = false
+cron = "0 2 * * *"  # Daily at 2am UTC
+topics_file = ""  # Path to file with one topic per line (optional)
+auto_generate_topics = true
+
+[agent]
+# The in-app video agent — an LLM that operates the project through 41 tools.
+# Supported providers: "nvidia" (NVIDIA Build API) or "openrouter" (OpenRouter.ai API)
+# Can also be overridden via FLOW_AGENT_PROVIDER, FLOW_AGENT_MODEL, FLOW_AGENT_BASE_URL, FLOW_AGENT_API_KEY env vars.
+provider = "nvidia"
+base_url = "https://integrate.api.nvidia.com/v1"
+api_key = ""  # or set FLOW_NVIDIA_API_KEY / OPENROUTER_API_KEY
+model = "kimi"  # alias -> moonshotai/kimi-k2.6; see all via GET /agent/models
+max_iterations = 12  # safety cap on the tool-calling loop
+
+[mcp]
+# MCP server exposing the same tools to external agents (Claude Code/Cursor).
+# Run with: `flow mcp`  (connect a client to http://127.0.0.1:8765/mcp)
+enabled = true
+host = "127.0.0.1"  # keep on loopback
+port = 8765
+token = ""  # bearer auth; or set FLOW_MCP_TOKEN
+
+[billing]
+# Gate generation tools (video/voice). Set false to disable generation.
+can_generate = true
+
+# General settings
+output_dir = "storage/outputs"
+aspect_ratio = "9:16"  # 9:16 for shorts, 16:9 for long-form
+generation_mode = "sequential"  # sequential, parallel_flf2v, or pipelined_flf2v

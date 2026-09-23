@@ -1,0 +1,12 @@
+This repo combines three existing projects. Their licenses stay in force.
+
+- apps/studio: Nautilus Studio, Apache-2.0. Upstream: https://github.com/yeahdongcn/nautilus-studio
+- packages/plan: Better Call CineCrew, Apache-2.0. Upstream: https://github.com/Ironieser/CineCrew
+  Paper: Chen, Dong, Zhou, Ma, Dou, Matusik, Gan. ECCV 2026.
+- packages/flow: OpenX Flow, MIT. Upstream: https://github.com/OpenX-Inc/flow
+
+Local forks used for this import:
+
+- https://github.com/shubhanshushrimali/nautilus-studio-ai-movie-sid
+- https://github.com/shubhanshushrimali/CineCrew-sid
+- https://github.com/shubhanshushrimali/Ai-flow-Sid

@@ -1,0 +1,480 @@
+from __future__ import annotations
+
+import asyncio
+from dataclasses import replace
+from pathlib import Path
+
+from test_assets import png_bytes
+
+from long_video_studio.adapters.h3 import H3Client
+from long_video_studio.assets import AssetService
+from long_video_studio.domain import (
+    AssetKind,
+    AssetRecord,
+    ContinuationMode,
+    FilmProject,
+    ProjectBrief,
+    RenderJob,
+    ShotSpec,
+    ShotStatus,
+    ShotTask,
+    UltraFastAnchorStrategy,
+    UltraFastTransition,
+    WorldBible,
+    effective_video_task,
+)
+from long_video_studio.repository import StudioRepository
+from long_video_studio.runner import RenderManager
+
+
+def _shot(index: int, **updates) -> ShotSpec:
+    values = {
+        "index": index,
+        "title": f"Shot {index + 1}",
+        "purpose": "Continue the story",
+        "duration_seconds": 5,
+        "task": ShotTask.FL2VA,
+        "prompt": f"Perform the new action for shot {index + 1}.",
+    }
+    values.update(updates)
+    return ShotSpec(**values)
+
+
+def test_continuation_fields_are_backward_compatible_and_overridable():
+    brief = ProjectBrief.model_validate({"prompt": "A creator makes a long film."})
+    shot = _shot(1, continuity_from_shot_id="shot_previous")
+
+    assert brief.continuation_mode == ContinuationMode.FAST
+    assert shot.continuation_mode is None
+
+    overridden = shot.model_copy(update={"continuation_mode": ContinuationMode.QUALITY})
+    assert overridden.continuation_mode == ContinuationMode.QUALITY
+
+
+def test_effective_video_task_prefers_ref2va_but_preserves_safe_fallbacks():
+    continuation = _shot(1, continuity_from_shot_id="shot_previous")
+    explicit_start = continuation.model_copy(
+        update={
+            "start_frame_asset_id": "creator_frame",
+            "task": ShotTask.REF2VA,
+        }
+    )
+
+    assert (
+        effective_video_task(
+            continuation,
+            ref2va_configured=True,
+            fl2va_configured=True,
+        )
+        == ShotTask.REF2VA
+    )
+    assert (
+        effective_video_task(
+            continuation,
+            ref2va_configured=False,
+            fl2va_configured=True,
+        )
+        == ShotTask.FL2VA
+    )
+    assert (
+        effective_video_task(
+            explicit_start,
+            ref2va_configured=True,
+            fl2va_configured=True,
+        )
+        == ShotTask.FL2VA
+    )
+
+
+def test_ultra_fast_continuation_forces_boundary_frame_fl2va_even_when_ref2va_is_ready():
+    continuation = _shot(
+        1,
+        continuity_from_shot_id="shot_previous",
+        continuation_mode=ContinuationMode.ULTRA_FAST,
+        task=ShotTask.REF2VA,
+    )
+    assert (
+        effective_video_task(
+            continuation,
+            ref2va_configured=True,
+            fl2va_configured=True,
+            continuation_mode=ContinuationMode.ULTRA_FAST,
+        )
+        == ShotTask.FL2VA
+    )
+
+
+def test_ultra_fast_scene_transition_choice_is_stable():
+    shots = [_shot(index) for index in range(4)]
+    project = FilmProject(
+        id="project_transition_seed",
+        brief=ProjectBrief(
+            prompt="A short drama.",
+            continuation_mode=ContinuationMode.ULTRA_FAST,
+            ultra_fast_transition=UltraFastTransition.RANDOM,
+        ),
+        world_bible=WorldBible(logline="A short drama", visual_style="cinematic"),
+        shots=shots,
+    )
+
+    first = RenderManager._ultra_fast_scene_transitions(project)
+    second = RenderManager._ultra_fast_scene_transitions(project)
+
+    assert first == second
+    assert len(first) == 3
+    assert set(first) <= {"fade_black", "dissolve", "fade"}
+
+
+def test_continuation_rule_is_ephemeral_and_idempotent():
+    original = _shot(1, continuity_from_shot_id="shot_previous")
+
+    first_request = RenderManager._with_continuation_rule(original)
+    retried_request = RenderManager._with_continuation_rule(first_request)
+
+    assert RenderManager.CONTINUATION_REF2VA_RULE not in original.prompt
+    assert first_request.prompt.count(RenderManager.CONTINUATION_REF2VA_RULE) == 1
+    assert retried_request.prompt.count(RenderManager.CONTINUATION_REF2VA_RULE) == 1
+
+
+def test_quality_normalizes_only_overlong_previous_clip(settings, tmp_path, monkeypatch):
+    configured = replace(settings, h3_fl2va_url="http://fl2va", h3_ref2va_url="http://ref2va")
+    repository = StudioRepository(configured.database_path)
+    first = _shot(0)
+    continuation = _shot(1, continuity_from_shot_id=first.id)
+    project = FilmProject(
+        brief=ProjectBrief(
+            prompt="A creator makes a long film.",
+            duration_seconds=15,
+            continuation_mode=ContinuationMode.QUALITY,
+        ),
+        world_bible=WorldBible(logline="A long film", visual_style="cinematic"),
+        shots=[first, continuation],
+    )
+    manager = RenderManager(configured, repository)
+    source = tmp_path / "shot-001.mp4"
+    boundary = tmp_path / "shot-001-boundary.png"
+    source.write_bytes(b"video")
+    boundary.write_bytes(png_bytes().getvalue())
+
+    def normalize(source_path, output_path):
+        assert source_path == source
+        return source
+
+    monkeypatch.setattr(manager.media, "normalize_ref2va_video", normalize)
+    image, media = asyncio.run(
+        manager._continuation_ref2va_inputs(
+            project,
+            continuation,
+            1,
+            {first.id: source},
+            {first.id: boundary},
+            tmp_path,
+        )
+    )
+
+    assert image == boundary
+    assert media == source
+
+
+def test_fast_render_routes_continuation_to_tail_ref2va_and_leaves_asset_ref2va_ordinary(
+    settings,
+    tmp_path,
+    monkeypatch,
+):
+    configured = replace(settings, h3_fl2va_url="http://fl2va", h3_ref2va_url="http://ref2va")
+    repository = StudioRepository(configured.database_path)
+    assets = AssetService(configured, repository)
+    start = assets.ingest_stream(png_bytes(), "start.png", "image/png")
+    ordinary_image_path = tmp_path / "ordinary.png"
+    ordinary_video_path = tmp_path / "ordinary.mp4"
+    ordinary_image_path.write_bytes(png_bytes("blue").getvalue())
+    ordinary_video_path.write_bytes(b"reference-video")
+    ordinary_image = repository.save_asset(
+        AssetRecord(
+            sha256="ordinary-image",
+            original_name="ordinary.png",
+            media_type="image/png",
+            kind=AssetKind.IMAGE,
+            size_bytes=ordinary_image_path.stat().st_size,
+            external_path=str(ordinary_image_path),
+            source="path",
+        )
+    )
+    ordinary_video = repository.save_asset(
+        AssetRecord(
+            sha256="ordinary-video",
+            original_name="ordinary.mp4",
+            media_type="video/mp4",
+            kind=AssetKind.VIDEO,
+            size_bytes=ordinary_video_path.stat().st_size,
+            external_path=str(ordinary_video_path),
+            source="path",
+        )
+    )
+    first = _shot(0, start_frame_asset_id=start.id, reference_asset_ids=[start.id])
+    continuation = _shot(1, continuity_from_shot_id=first.id)
+    ordinary = _shot(
+        2,
+        task=ShotTask.REF2VA,
+        reference_asset_ids=[ordinary_image.id, ordinary_video.id],
+    )
+    project = repository.save_project(
+        FilmProject(
+            brief=ProjectBrief(
+                prompt="A creator makes a long film.",
+                duration_seconds=15,
+                continuation_mode=ContinuationMode.FAST,
+            ),
+            world_bible=WorldBible(logline="A long film", visual_style="cinematic"),
+            shots=[first, continuation, ordinary],
+        )
+    )
+    manager = RenderManager(configured, repository)
+    ref2va_requests: list[tuple[ShotSpec, Path]] = []
+    extracted: list[tuple[Path, Path, float]] = []
+
+    async def fake_fl2va(self, shot, start_frame, output_path, **kwargs):
+        output_path.write_bytes(b"fl2va")
+        return output_path
+
+    async def fake_ref2va(self, shot, reference_image, reference_media, output_path, **kwargs):
+        ref2va_requests.append((shot, reference_media))
+        output_path.write_bytes(b"ref2va")
+        return output_path
+
+    def fake_fit(source, output, width, height):
+        output.write_bytes(Path(source).read_bytes())
+        return output
+
+    def fake_boundary(source, output):
+        output.write_bytes(png_bytes("green").getvalue())
+        return output
+
+    def fake_tail(source, output, duration):
+        extracted.append((source, output, duration))
+        output.write_bytes(b"tail-with-audio-video")
+        return output
+
+    def fake_concatenate(videos, output, *args, **kwargs):
+        output.write_bytes(b"final")
+        return output
+
+    monkeypatch.setattr(H3Client, "generate_fl2va", fake_fl2va)
+    monkeypatch.setattr(H3Client, "generate_ref2va", fake_ref2va)
+    monkeypatch.setattr(manager.media, "fit_image_to_canvas", fake_fit)
+    monkeypatch.setattr(manager.media, "extract_last_stable_frame", fake_boundary)
+    monkeypatch.setattr(manager.media, "normalize_ref2va_video", lambda source, output: source)
+    monkeypatch.setattr(manager.media, "extract_tail", fake_tail)
+    monkeypatch.setattr(manager.media, "concatenate", fake_concatenate)
+
+    job = repository.save_job(RenderJob(project_id=project.id))
+    asyncio.run(manager._run(job.id))
+
+    completed = repository.get_job(job.id)
+    assert completed is not None and completed.status == "complete"
+    assert len(ref2va_requests) == 2
+    continuation_request, continuation_media = ref2va_requests[0]
+    ordinary_request, ordinary_media = ref2va_requests[1]
+    assert continuation_request.prompt.count(RenderManager.CONTINUATION_REF2VA_RULE) == 1
+    assert continuation_media.name.endswith("continuation-tail-5s.mp4")
+    assert extracted == [
+        (
+            configured.output_dir / project.id / "shot-001.mp4",
+            continuation_media,
+            5.0,
+        )
+    ]
+    assert RenderManager.CONTINUATION_REF2VA_RULE not in ordinary_request.prompt
+    assert ordinary_media == ordinary_video_path
+    persisted = repository.get_project(project.id)
+    assert persisted is not None
+    assert RenderManager.CONTINUATION_REF2VA_RULE not in persisted.shots[1].prompt
+    assert persisted.shots[1].render_started_at is not None
+    assert persisted.shots[1].render_completed_at is not None
+    assert persisted.shots[1].render_duration_seconds is not None
+    assert persisted.shots[1].render_duration_seconds >= 0
+
+
+def test_ultra_fast_render_uses_only_previous_boundary_with_no_anchor_provider(
+    settings,
+    tmp_path,
+    monkeypatch,
+):
+    configured = replace(
+        settings,
+        h3_fl2va_url="http://fl2va",
+        h3_ref2va_url="http://ref2va",
+        image_edit_anchor_mode="every-shot",
+    )
+    repository = StudioRepository(configured.database_path)
+    assets = AssetService(configured, repository)
+    start = assets.ingest_stream(png_bytes(), "start.png", "image/png")
+    first = _shot(0, start_frame_asset_id=start.id, reference_asset_ids=[start.id])
+    continuation = _shot(
+        1,
+        continuity_from_shot_id=first.id,
+        continuation_mode=ContinuationMode.ULTRA_FAST,
+        task=ShotTask.REF2VA,
+        anchor_prompt="This must not be called for boundary-frame continuation.",
+    )
+    project = repository.save_project(
+        FilmProject(
+            brief=ProjectBrief(
+                prompt="A creator makes a boundary-frame continuation.",
+                duration_seconds=15,
+                continuation_mode=ContinuationMode.ULTRA_FAST,
+                ultra_fast_anchor_strategy=UltraFastAnchorStrategy.BOUNDARY,
+            ),
+            world_bible=WorldBible(logline="A short film", visual_style="cinematic"),
+            shots=[first, continuation],
+        )
+    )
+    manager = RenderManager(configured, repository)
+    fl2va_starts: list[Path] = []
+    fit_sources: list[Path] = []
+    ref2va_calls: list[Path] = []
+    active_services: list[str | None] = []
+
+    async def fake_fl2va(self, shot, start_frame, output_path, **kwargs):
+        active = repository.get_job(job.id)
+        active_services.append(active.current_service_id if active else None)
+        fl2va_starts.append(Path(start_frame))
+        output_path.write_bytes(b"fl2va")
+        return output_path
+
+    async def unexpected_ref2va(self, *args, **kwargs):
+        ref2va_calls.append(Path("called"))
+        raise AssertionError("ultra-fast continuation must not call Ref2VA")
+
+    def fake_fit(source, output, width, height):
+        fit_sources.append(Path(source))
+        output.write_bytes(Path(source).read_bytes())
+        return output
+
+    def fake_boundary(source, output):
+        output.write_bytes(png_bytes("green").getvalue())
+        return output
+
+    def fake_concatenate(videos, output, *args, **kwargs):
+        output.write_bytes(b"final")
+        return output
+
+    monkeypatch.setattr(H3Client, "generate_fl2va", fake_fl2va)
+    monkeypatch.setattr(H3Client, "generate_ref2va", unexpected_ref2va)
+    monkeypatch.setattr(manager.media, "fit_image_to_canvas", fake_fit)
+    monkeypatch.setattr(manager.media, "extract_last_stable_frame", fake_boundary)
+    monkeypatch.setattr(manager.media, "concatenate", fake_concatenate)
+
+    job = repository.save_job(RenderJob(project_id=project.id))
+    asyncio.run(manager._run(job.id))
+
+    completed = repository.get_job(job.id)
+    assert completed is not None and completed.status == "complete"
+    assert completed.current_service_id is None
+    assert not ref2va_calls
+    assert active_services == ["fl2va", "fl2va"]
+    assert len(fl2va_starts) == 2
+    assert fit_sources[1].name == "shot-001-boundary.png"
+    persisted = repository.get_project(project.id)
+    assert persisted is not None
+    assert persisted.shots[1].anchor_frame_path is None
+
+
+def test_failed_render_can_resume_a_completed_first_clip(settings, tmp_path, monkeypatch):
+    configured = replace(settings, h3_fl2va_url="http://fl2va", h3_ref2va_url="http://ref2va")
+    repository = StudioRepository(configured.database_path)
+    completed_video = tmp_path / "completed-shot-001.mp4"
+    completed_boundary = tmp_path / "completed-shot-001-boundary.png"
+    completed_video.write_bytes(b"existing-video")
+    completed_boundary.write_bytes(png_bytes("navy").getvalue())
+    first = _shot(
+        0,
+        status=ShotStatus.COMPLETE,
+        selected_take_path=str(completed_video),
+        boundary_frame_path=str(completed_boundary),
+    )
+    continuation = _shot(1, continuity_from_shot_id=first.id)
+    project = repository.save_project(
+        FilmProject(
+            brief=ProjectBrief(
+                prompt="Resume a failed long film.",
+                duration_seconds=15,
+                continuation_mode=ContinuationMode.QUALITY,
+            ),
+            world_bible=WorldBible(logline="Resume", visual_style="cinematic"),
+            shots=[first, continuation],
+        )
+    )
+    manager = RenderManager(configured, repository)
+    ref2va_media: list[Path] = []
+
+    async def unexpected_fl2va(*args, **kwargs):
+        raise AssertionError("the completed first clip must be reused")
+
+    async def fake_ref2va(self, shot, reference_image, reference_media, output_path, **kwargs):
+        ref2va_media.append(reference_media)
+        output_path.write_bytes(b"continued-video")
+        return output_path
+
+    def fake_boundary(source, output):
+        output.write_bytes(png_bytes("green").getvalue())
+        return output
+
+    def fake_concatenate(videos, output, *args, **kwargs):
+        output.write_bytes(b"final")
+        return output
+
+    monkeypatch.setattr(H3Client, "generate_fl2va", unexpected_fl2va)
+    monkeypatch.setattr(H3Client, "generate_ref2va", fake_ref2va)
+    monkeypatch.setattr(manager.media, "extract_last_stable_frame", fake_boundary)
+    monkeypatch.setattr(manager.media, "normalize_ref2va_video", lambda source, output: source)
+    monkeypatch.setattr(manager.media, "concatenate", fake_concatenate)
+
+    job = repository.save_job(RenderJob(project_id=project.id))
+    asyncio.run(manager._run(job.id))
+
+    completed = repository.get_job(job.id)
+    assert completed is not None and completed.status == "complete"
+    assert ref2va_media == [completed_video]
+
+
+def test_forced_render_clears_previous_takes_and_final_output(settings):
+    repository = StudioRepository(settings.database_path)
+    manager = RenderManager(settings, repository)
+    output_dir = settings.output_dir / "project-force"
+    output_dir.mkdir(parents=True)
+    old_take = output_dir / "shot-001.mp4"
+    old_boundary = output_dir / "shot-001-boundary.png"
+    final = output_dir / "final.mp4"
+    old_take.write_bytes(b"old take")
+    old_boundary.write_bytes(b"old boundary")
+    final.write_bytes(b"old final")
+    shot = ShotSpec(
+        index=0,
+        title="Old shot",
+        purpose="Old",
+        duration_seconds=10,
+        task=ShotTask.FL2VA,
+        prompt="Old shot.",
+        status=ShotStatus.COMPLETE,
+        selected_take_path=str(old_take),
+        boundary_frame_path=str(old_boundary),
+        render_duration_seconds=100,
+    )
+    project = FilmProject(
+        id="project-force",
+        brief=ProjectBrief(prompt="Render again."),
+        world_bible=WorldBible(logline="Again", visual_style="Natural"),
+        shots=[shot],
+        status="complete",
+    )
+
+    manager._clear_forced_render_state(project, output_dir)
+
+    assert shot.status == ShotStatus.PLANNED
+    assert shot.selected_take_path is None
+    assert shot.boundary_frame_path is None
+    assert shot.render_duration_seconds is None
+    assert not old_take.exists()
+    assert not old_boundary.exists()
+    assert not final.exists()
