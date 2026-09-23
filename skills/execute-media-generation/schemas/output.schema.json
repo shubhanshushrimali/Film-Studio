@@ -1,0 +1,84 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Execute Media Generation Result",
+  "allOf": [
+    {"$ref": "../../../schemas/common/result-envelope.schema.json"}
+  ],
+  "properties": {
+    "skill": {"const": "execute-media-generation"},
+    "data": {
+      "type": "object",
+      "required": ["jobs", "media_assets", "cost_summary", "execution_gate"],
+      "properties": {
+        "jobs": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "id",
+              "request_id",
+              "kind",
+              "provider",
+              "model",
+              "status",
+              "attempt",
+              "idempotency_key"
+            ],
+            "properties": {
+              "id": {"type": "string"},
+              "request_id": {"type": "string"},
+              "kind": {"enum": ["image", "video", "audio"]},
+              "provider": {"type": "string"},
+              "model": {"type": "string"},
+              "status": {
+                "enum": ["queued", "running", "succeeded", "failed", "canceled", "blocked"]
+              },
+              "attempt": {"type": "integer", "minimum": 1},
+              "idempotency_key": {"type": "string", "minLength": 1},
+              "provider_job_id": {"type": "string"},
+              "error_code": {"type": "string"}
+            },
+            "additionalProperties": true
+          }
+        },
+        "media_assets": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["id", "job_id", "kind", "uri", "checksum"],
+            "properties": {
+              "id": {"type": "string"},
+              "job_id": {"type": "string"},
+              "kind": {"enum": ["image", "video", "audio"]},
+              "uri": {"type": "string"},
+              "checksum": {"type": "string"}
+            },
+            "additionalProperties": true
+          }
+        },
+        "cost_summary": {
+          "type": "object",
+          "required": ["currency", "estimated", "actual", "items"],
+          "properties": {
+            "currency": {"type": "string"},
+            "estimated": {"type": "number", "minimum": 0},
+            "actual": {"type": "number", "minimum": 0},
+            "items": {"type": "array", "items": {"type": "object"}}
+          },
+          "additionalProperties": false
+        },
+        "execution_gate": {
+          "type": "object",
+          "required": ["ready", "checks"],
+          "properties": {
+            "ready": {"type": "boolean"},
+            "checks": {"type": "array", "items": {"type": "object"}}
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "unevaluatedProperties": false
+}

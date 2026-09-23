@@ -1,0 +1,16 @@
+[project]
+name = "film-platform"
+version = "0.1.0"
+description = "Job rules, scene chunks, and the crew order for the film studio."
+requires-python = ">=3.10"
+dependencies = []
+
+[project.optional-dependencies]
+graph = ["langgraph>=0.2"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]

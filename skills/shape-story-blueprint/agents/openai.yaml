@@ -1,0 +1,4 @@
+interface:
+  display_name: "故事蓝图"
+  short_description: "将结构化剧本整理为项目创作约束、叙事节点和制作交接蓝图"
+  default_prompt: "使用 $shape-story-blueprint 根据结构化剧本建立故事蓝图。"

@@ -27,6 +27,12 @@ npm --prefix web run build
 nautilus-studio --host 127.0.0.1 --port 7860
 ```
 
+## Production spine
+
+- `skills/` holds local skill folders only. No nested git repos.
+- `packages/platform/` is the job rules, scene chunks, crew order, and local Postgres, Redis, and Neo4j.
+- The Plan button does not use that spine yet.
+
 ## Licenses
 
 Nautilus and CineCrew are Apache-2.0. Ai-flow is MIT. Notices stay in each folder.

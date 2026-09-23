@@ -447,6 +447,7 @@ class FilmProject(BaseModel):
     timeline: list[TimelineClip] = Field(default_factory=list)
     status: Literal["planning", "planned", "compiled", "rendering", "complete", "failed"] = "planned"
     planner_trace: list[PlannerTraceEvent] = Field(default_factory=list)
+    film_dsl: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
 

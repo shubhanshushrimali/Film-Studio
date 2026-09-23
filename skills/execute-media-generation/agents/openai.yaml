@@ -1,0 +1,4 @@
+interface:
+  display_name: "媒体生成执行"
+  short_description: "执行图片、视频和音频任务，持久化媒体、费用与完整运行状态"
+  default_prompt: "使用 $execute-media-generation 执行这个生成请求包并返回可追溯的媒体资产。"

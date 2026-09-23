@@ -1,0 +1,22 @@
+# Local data services. Passwords are for this laptop only.
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: film
+      POSTGRES_PASSWORD: film
+      POSTGRES_DB: film
+    ports:
+      - "5432:5432"
+  redis:
+    image: redis:7
+    ports:
+      - "6379:6379"
+  neo4j:
+    image: neo4j:5
+    environment:
+      NEO4J_AUTH: neo4j/filmfilm
+    ports:
+      - "7474:7474"
+      - "7687:7687"

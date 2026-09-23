@@ -37,6 +37,15 @@ from long_video_studio.domain import (
 )
 from long_video_studio.estimator import RenderEstimator
 from long_video_studio.h3_context import stable_speaker_ids
+from long_video_studio.production_rules import (
+    chain_last_frames,
+    film_dsl,
+    render_model_name,
+    require_locked_faces,
+    write_film_dsl,
+    write_generation,
+    write_handoff,
+)
 from long_video_studio.repository import StudioRepository
 
 
@@ -125,6 +134,21 @@ class RenderManager:
             self._clear_forced_render_state(project, output_dir)
             project.updated_at = utc_now()
             self.repository.save_project(project)
+        require_locked_faces(project)
+        chain_last_frames(project)
+        project.film_dsl = film_dsl(project)
+        write_film_dsl(project, output_dir)
+        self.repository.save_project(project)
+        write_handoff(project, output_dir)
+        write_generation(
+            project,
+            output_dir,
+            render_model_name(
+                fl2va_url=self.settings.h3_fl2va_url,
+                ref2va_url=self.settings.h3_ref2va_url,
+                image_edit_model=self.settings.image_edit_model,
+            ),
+        )
         rendered: list[Path] = []
         rendered_by_shot: dict[str, Path] = {}
         boundary_frames: dict[str, Path] = {}
